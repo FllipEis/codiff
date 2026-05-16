@@ -160,21 +160,61 @@
 .sidebar-path-row {
   align-items: center;
   display: flex;
+  gap: 10px;
   min-height: 42px;
   min-width: 0;
   padding-top: 10px;
   padding-left: 72px;
 }
 
-.sidebar-path {
+.sidebar-project-select {
+  -webkit-app-region: no-drag;
+  appearance: none;
+  background: rgb(127 127 127 / 0.1);
+  border: 0;
+  border-radius: 15px;
   color: var(--sidebar-text);
   font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 600;
+  height: 32px;
+  line-height: 32px;
+  min-width: 0;
+  outline: none;
   overflow: hidden;
+  padding: 0 24px 0 12px;
   text-overflow: ellipsis;
-  transform: translateY(-6px);
   white-space: nowrap;
+  width: 100%;
+}
+
+.sidebar-project-select:focus,
+.sidebar-open-button:focus-visible {
+  box-shadow: 0 0 0 2px rgb(61 135 245 / 0.32);
+}
+
+.sidebar-open-button {
+  -webkit-app-region: no-drag;
+  align-items: center;
+  background: rgb(127 127 127 / 0.1);
+  border: 0;
+  border-radius: 16px;
+  color: var(--sidebar-text);
+  cursor: pointer;
+  display: inline-flex;
+  flex: none;
+  font-size: 20px;
+  font-weight: 500;
+  height: 32px;
+  justify-content: center;
+  line-height: 1;
+  outline: none;
+  padding: 0 0 2px;
+  width: 32px;
+}
+
+.sidebar-open-button:hover {
+  background: rgb(127 127 127 / 0.16);
 }
 
 .sidebar-search-row {

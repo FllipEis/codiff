@@ -9,6 +9,7 @@ import {
 import { CodeView, type CodeViewHandle, WorkerPoolContextProvider } from '@pierre/diffs/react';
 import { FileTree, useFileTree } from '@pierre/trees/react';
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { ProjectSelector } from './project-selector.tsx';
 import dunkelTheme from './themes/dunkel.json' with { type: 'json' };
 import lichtTheme from './themes/licht.json' with { type: 'json' };
 import type {
@@ -16,6 +17,7 @@ import type {
   CodiffPreferences,
   DiffSection,
   GitFileStatus,
+  ProjectList,
   RepositoryState,
 } from './types.ts';
 
@@ -107,24 +109,6 @@ const codeViewUnsafeCSS = `
     margin-right: 14px;
   }
 `;
-
-const compactPath = (path: string) => {
-  const homePath = path
-    .replace(/^\/Users\/[^/]+(?=\/|$)/, '~')
-    .replace(/^\/home\/[^/]+(?=\/|$)/, '~');
-  const parts = homePath.split('/').filter(Boolean);
-
-  if (parts.length <= 2) {
-    return homePath;
-  }
-
-  const prefix = homePath.startsWith('/') ? '/' : '';
-  const [first, ...rest] = parts;
-  const last = rest.pop();
-  const middle = rest.map((part) => part[0]).join('/');
-
-  return `${prefix}${first}/${middle ? `${middle}/` : ''}${last}`;
-};
 
 function compareTreePaths(leftPath: string, rightPath: string) {
   const leftParts = leftPath.split('/');
@@ -803,6 +787,7 @@ export default function App() {
   const [itemVersionByPath, setItemVersionByPath] = useState<Record<string, number>>({});
   const [localChangesDetected, setLocalChangesDetected] = useState(false);
   const [preferences, setPreferences] = useState<CodiffPreferences>(defaultPreferences);
+  const [projects, setProjects] = useState<ProjectList | null>(null);
   const [scrollTarget, setScrollTarget] = useState<{ path: string; request: number } | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -811,6 +796,52 @@ export default function App() {
   const loadingSectionKeysRef = useRef<Set<string>>(new Set());
   const programmaticScrollPathRef = useRef<string | null>(null);
   const programmaticScrollTimerRef = useRef<number | null>(null);
+
+  const applyRepositoryState = useCallback(
+    (nextState: RepositoryState, preserveSelection = false) => {
+      const orderedState = {
+        ...nextState,
+        files: sortFiles(nextState.files),
+      };
+      const nextViewed = readViewed(orderedState.root);
+
+      setState(orderedState);
+      setError(null);
+      setCollapsed(
+        new Set(
+          orderedState.files
+            .filter((file) => nextViewed[file.path] === file.fingerprint)
+            .map((file) => file.path),
+        ),
+      );
+      setItemVersionByPath({});
+      setViewed(nextViewed);
+      setScrollTarget(null);
+      setSearchQuery('');
+      setSelectedPath((current) =>
+        preserveSelection && current && orderedState.files.some((file) => file.path === current)
+          ? current
+          : (orderedState.files[0]?.path ?? null),
+      );
+    },
+    [],
+  );
+
+  const loadRepositoryState = useCallback(
+    (preserveSelection = false) => {
+      setError(null);
+
+      return window.codiff
+        .getRepositoryState()
+        .then((nextState) => {
+          applyRepositoryState(nextState, preserveSelection);
+        })
+        .catch((error: unknown) => {
+          setError(error instanceof Error ? error.message : String(error));
+        });
+    },
+    [applyRepositoryState],
+  );
 
   const bumpItemVersion = useCallback((path: string) => {
     setItemVersionByPath((current) => ({
@@ -822,31 +853,14 @@ export default function App() {
   useEffect(() => {
     let canceled = false;
 
-    window.codiff
-      .getRepositoryState()
-      .then((nextState) => {
+    Promise.all([window.codiff.getProjects(), window.codiff.getRepositoryState()])
+      .then(([nextProjects, nextState]) => {
         if (canceled) {
           return;
         }
 
-        const orderedState = {
-          ...nextState,
-          files: sortFiles(nextState.files),
-        };
-        const nextViewed = readViewed(orderedState.root);
-
-        setState(orderedState);
-        setError(null);
-        setCollapsed(
-          new Set(
-            orderedState.files
-              .filter((file) => nextViewed[file.path] === file.fingerprint)
-              .map((file) => file.path),
-          ),
-        );
-        setItemVersionByPath({});
-        setViewed(nextViewed);
-        setSelectedPath((current) => current ?? orderedState.files[0]?.path ?? null);
+        setProjects(nextProjects);
+        applyRepositoryState(nextState);
       })
       .catch((error: unknown) => {
         if (!canceled) {
@@ -857,7 +871,7 @@ export default function App() {
     return () => {
       canceled = true;
     };
-  }, []);
+  }, [applyRepositoryState]);
 
   useEffect(
     () =>
@@ -1131,6 +1145,34 @@ export default function App() {
     [bumpItemVersion, state],
   );
 
+  const loadProject = useCallback(
+    (projectAction: () => Promise<ProjectList>) =>
+      projectAction()
+        .then((nextProjects) => {
+          setProjects(nextProjects);
+          return loadRepositoryState();
+        })
+        .catch((error: unknown) => {
+          setError(error instanceof Error ? error.message : String(error));
+        }),
+    [loadRepositoryState],
+  );
+
+  const handleOpenProject = useCallback(() => {
+    loadProject(() => window.codiff.openProject());
+  }, [loadProject]);
+
+  const handleSelectProject = useCallback(
+    (root: string) => {
+      if (root === projects?.activeRoot) {
+        return;
+      }
+
+      loadProject(() => window.codiff.selectProject(root));
+    },
+    [loadProject, projects?.activeRoot],
+  );
+
   if (error) {
     return (
       <main className="empty-state">
@@ -1156,11 +1198,12 @@ export default function App() {
       <RepositoryChangeBanner visible={localChangesDetected} />
       <aside className="sidebar squircle">
         <div className="sidebar-header">
-          <div className="sidebar-path-row">
-            <div className="sidebar-path" title={state.root}>
-              {compactPath(state.root)}
-            </div>
-          </div>
+          <ProjectSelector
+            activeRoot={state.root}
+            onOpenProject={handleOpenProject}
+            onSelectProject={handleSelectProject}
+            projects={projects}
+          />
         </div>
         <Sidebar
           files={visibleFiles}

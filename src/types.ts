@@ -54,6 +54,16 @@ export type RepositoryHistory = {
   root: string;
 };
 
+export type ProjectEntry = {
+  label: string;
+  root: string;
+};
+
+export type ProjectList = {
+  activeRoot: string;
+  entries: ReadonlyArray<ProjectEntry>;
+};
+
 export type RepositoryState = {
   files: ReadonlyArray<ChangedFile>;
   generatedAt: number;

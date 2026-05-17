@@ -1,6 +1,7 @@
 {
   "name": "codiff",
-  "version": "0.0.1",
+  "version": "0.1.0",
+  "description": "A visual diff tool for Git changes.",
   "author": "Christoph Nakazawa <christoph.pojer@gmail.com>",
   "repository": {
     "type": "git",

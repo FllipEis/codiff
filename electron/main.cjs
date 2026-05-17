@@ -27,6 +27,7 @@ const {
   readDiffSectionContent,
   readRepositoryChangeSignature,
   readRepositoryState,
+  validateRepositoryPath,
 } = require('./git-state.cjs');
 
 const root = dirname(__dirname);
@@ -239,6 +240,14 @@ const buildApplicationMenu = () =>
         { role: 'pasteAndMatchStyle' },
         { role: 'delete' },
         { role: 'selectAll' },
+        { type: 'separator' },
+        {
+          accelerator: 'CommandOrControl+F',
+          click: (_menuItem, browserWindow) => {
+            browserWindow?.webContents.send('codiff:findInDiffs');
+          },
+          label: 'Find in Diffs',
+        },
       ],
     },
     {
@@ -367,7 +376,8 @@ ipcMain.handle('codiff:getPreferences', () => preferences);
 ipcMain.handle('codiff:showInFolder', async (event, filePath) => {
   const repositoryPath = windowRepositories.get(event.sender.id) || getLaunchPath();
   const state = await readRepositoryState(repositoryPath);
-  const absolutePath = resolve(state.root, filePath);
+  const repositoryFilePath = validateRepositoryPath(filePath);
+  const absolutePath = resolve(state.root, repositoryFilePath);
 
   if (existsSync(absolutePath)) {
     shell.showItemInFolder(absolutePath);

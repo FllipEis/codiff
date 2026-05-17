@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -280,6 +280,27 @@ test('readWorkingTreeState marks modified binary files as binary sections', asyn
     expect(state.files[0].sections[0].binary).toBe(true);
     expect(state.files[0].sections[0].oldFile).toBeUndefined();
     expect(state.files[0].sections[0].newFile).toBeUndefined();
+  });
+});
+
+test('readWorkingTreeState reads changed symlinks as link text', async () => {
+  await withRepo(async (repo) => {
+    await writeRepoFile(repo, 'target-v1.txt', 'target v1 contents\n');
+    await writeRepoFile(repo, 'target-v2.txt', 'target v2 contents\n');
+    await symlink('target-v1.txt', join(repo, 'link.txt'));
+    await commitAll(repo, 'initial commit');
+    await rm(join(repo, 'link.txt'));
+    await symlink('target-v2.txt', join(repo, 'link.txt'));
+
+    const state = await readWorkingTreeState(repo);
+    const link = state.files.find((file) => file.path === 'link.txt');
+
+    expect(link?.status).toBe('modified');
+    expect(link?.sections).toHaveLength(1);
+    expect(link?.sections[0].oldFile?.contents).toBe('target-v1.txt');
+    expect(link?.sections[0].newFile?.contents).toBe('target-v2.txt');
+    expect(link?.sections[0].patch).toContain('-target-v1.txt');
+    expect(link?.sections[0].patch).toContain('+target-v2.txt');
   });
 });
 

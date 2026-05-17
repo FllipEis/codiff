@@ -165,7 +165,7 @@ const validateRepositoryPath = (path) => {
 
 const readFileStat = async (repoRoot, path) => {
   try {
-    return await fs.stat(join(repoRoot, path));
+    return await fs.lstat(join(repoRoot, path));
   } catch {
     return undefined;
   }
@@ -287,6 +287,37 @@ const readWorkingTreeFile = async (repoRoot, path, options = {}) => {
         summary: createSummary('Untracked directory is collapsed by default.', {
           canLoad: false,
         }),
+      };
+    }
+
+    if (stat.isSymbolicLink()) {
+      const contents = await fs.readlink(join(repoRoot, path));
+      const size = Buffer.byteLength(contents);
+
+      if (size > limit) {
+        return {
+          binary: false,
+          loadState: size > MANUAL_TEXT_FILE_LIMIT ? 'too-large' : 'deferred',
+          summary: createSummary(
+            size > MANUAL_TEXT_FILE_LIMIT
+              ? `Symlink target is ${formatBytes(size)}, so Codiff skipped rendering it.`
+              : `Symlink target is ${formatBytes(size)} and will be loaded on demand.`,
+            {
+              canLoad: size <= MANUAL_TEXT_FILE_LIMIT,
+              limit,
+              size,
+            },
+          ),
+        };
+      }
+
+      return {
+        binary: false,
+        file: {
+          cacheKey: `worktree:${path}:symlink:${contents}`,
+          contents,
+          name: path,
+        },
       };
     }
 
@@ -688,7 +719,7 @@ const readUntrackedFileSignatures = async (repoRoot) => {
 
   for (const path of paths) {
     try {
-      const stat = await fs.stat(join(repoRoot, path));
+      const stat = await fs.lstat(join(repoRoot, path));
       signatures.push(`${path}\0${stat.size}\0${stat.mtimeMs}\0${stat.mode}`);
     } catch {
       signatures.push(`${path}\0missing`);
@@ -825,4 +856,5 @@ module.exports = {
   readCommitState,
   readRepositoryState,
   readWorkingTreeState,
+  validateRepositoryPath,
 };

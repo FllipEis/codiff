@@ -5,6 +5,11 @@ contextBridge.exposeInMainWorld('codiff', {
   getPreferences: () => ipcRenderer.invoke('codiff:getPreferences'),
   getRepositoryHistory: (limit) => ipcRenderer.invoke('codiff:getRepositoryHistory', limit),
   getRepositoryState: (source) => ipcRenderer.invoke('codiff:getRepositoryState', source),
+  onFindInDiffs: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('codiff:findInDiffs', listener);
+    return () => ipcRenderer.removeListener('codiff:findInDiffs', listener);
+  },
   onPreferencesChanged: (callback) => {
     const listener = (_event, preferences) => callback(preferences);
     ipcRenderer.on('codiff:preferencesChanged', listener);

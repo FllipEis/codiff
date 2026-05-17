@@ -8,7 +8,15 @@ import {
 } from '@pierre/diffs';
 import { CodeView, type CodeViewHandle, WorkerPoolContextProvider } from '@pierre/diffs/react';
 import { FileTree, useFileTree } from '@pierre/trees/react';
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent,
+} from 'react';
 import dunkelTheme from './themes/dunkel.json' with { type: 'json' };
 import lichtTheme from './themes/licht.json' with { type: 'json' };
 import type {
@@ -20,6 +28,19 @@ import type {
 } from './types.ts';
 
 type CodeViewInstance = NonNullable<ReturnType<CodeViewHandle<undefined>['getInstance']>>;
+
+type DiffSearchMatch = {
+  filePath: string;
+  itemId: string;
+  lineNumber?: number;
+  side?: 'additions' | 'deletions';
+};
+
+type DiffSearchResult = {
+  file: ChangedFile;
+  matchCount: number;
+  matches: ReadonlyArray<DiffSearchMatch>;
+};
 
 registerCustomTheme('Licht', async () => lichtTheme as never);
 registerCustomTheme('Dunkel', async () => dunkelTheme as never);
@@ -105,6 +126,18 @@ const codeViewUnsafeCSS = `
   [data-diff-type="single"] [data-code]::-webkit-scrollbar-track,
   [data-diff-type="split"] [data-code][data-additions]::-webkit-scrollbar-track {
     margin-right: 14px;
+  }
+
+  .codiff-search-mark {
+    background: var(--diffs-find-highlight-bg, rgb(255 216 92 / 0.65));
+    border-radius: 3px;
+    color: inherit;
+    padding: 0 1px;
+  }
+
+  .codiff-search-mark.active {
+    background: var(--diffs-find-active-bg, rgb(255 176 46 / 0.96));
+    box-shadow: 0 0 0 1px rgb(255 142 36 / 0.4);
   }
 `;
 
@@ -203,6 +236,256 @@ const writeViewed = (root: string, viewed: Record<string, string>) => {
 };
 
 const getItemId = (section: DiffSection) => `diff:${section.id}`;
+
+const countOccurrences = (text: string, normalizedQuery: string) => {
+  if (!normalizedQuery) {
+    return 0;
+  }
+
+  const normalizedText = text.toLowerCase();
+  let count = 0;
+  let index = normalizedText.indexOf(normalizedQuery);
+  while (index !== -1) {
+    count += 1;
+    index = normalizedText.indexOf(normalizedQuery, index + normalizedQuery.length);
+  }
+
+  return count;
+};
+
+const lineContainsQuery = (text: string | undefined, normalizedQuery: string) =>
+  text != null && text.toLowerCase().includes(normalizedQuery);
+
+export const getDiffSearchResult = (
+  file: ChangedFile,
+  showWhitespace: boolean,
+  query: string,
+): DiffSearchResult | null => {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return null;
+  }
+
+  const matches: Array<DiffSearchMatch> = [];
+  let matchCount = 0;
+  const seenLineMatches = new Set<string>();
+
+  const pushMatch = (match: DiffSearchMatch, occurrences: number) => {
+    matchCount += occurrences;
+    const key = `${match.itemId}:${match.side ?? 'header'}:${match.lineNumber ?? 'header'}`;
+    if (!seenLineMatches.has(key)) {
+      seenLineMatches.add(key);
+      matches.push(match);
+    }
+  };
+
+  const headerOccurrences =
+    countOccurrences(file.path, normalizedQuery) +
+    (file.oldPath ? countOccurrences(file.oldPath, normalizedQuery) : 0);
+
+  if (headerOccurrences > 0) {
+    const section = getFirstVisibleSection(file, showWhitespace);
+    if (section) {
+      pushMatch(
+        {
+          filePath: file.path,
+          itemId: getItemId(section),
+        },
+        headerOccurrences,
+      );
+    }
+  }
+
+  for (const { fileDiff, section } of getVisibleDiffSections(file, showWhitespace)) {
+    const itemId = getItemId(section);
+
+    for (const hunk of fileDiff.hunks) {
+      let deletionLineNumber = hunk.deletionStart;
+      let additionLineNumber = hunk.additionStart;
+
+      for (const content of hunk.hunkContent) {
+        if (content.type === 'context') {
+          for (let index = 0; index < content.lines; index += 1) {
+            const line = fileDiff.additionLines[content.additionLineIndex + index];
+            const occurrences = countOccurrences(line ?? '', normalizedQuery);
+            if (occurrences > 0) {
+              pushMatch(
+                {
+                  filePath: file.path,
+                  itemId,
+                  lineNumber: additionLineNumber + index,
+                  side: 'additions',
+                },
+                occurrences,
+              );
+            }
+          }
+
+          deletionLineNumber += content.lines;
+          additionLineNumber += content.lines;
+          continue;
+        }
+
+        for (let index = 0; index < content.deletions; index += 1) {
+          const line = fileDiff.deletionLines[content.deletionLineIndex + index];
+          const occurrences = countOccurrences(line ?? '', normalizedQuery);
+          if (occurrences > 0) {
+            pushMatch(
+              {
+                filePath: file.path,
+                itemId,
+                lineNumber: deletionLineNumber + index,
+                side: 'deletions',
+              },
+              occurrences,
+            );
+          }
+        }
+
+        for (let index = 0; index < content.additions; index += 1) {
+          const line = fileDiff.additionLines[content.additionLineIndex + index];
+          const occurrences = countOccurrences(line ?? '', normalizedQuery);
+          if (occurrences > 0) {
+            pushMatch(
+              {
+                filePath: file.path,
+                itemId,
+                lineNumber: additionLineNumber + index,
+                side: 'additions',
+              },
+              occurrences,
+            );
+          }
+        }
+
+        deletionLineNumber += content.deletions;
+        additionLineNumber += content.additions;
+      }
+    }
+
+    if (section.summary?.reason && lineContainsQuery(section.summary.reason, normalizedQuery)) {
+      pushMatch(
+        {
+          filePath: file.path,
+          itemId,
+          lineNumber: 1,
+          side: 'additions',
+        },
+        countOccurrences(section.summary.reason, normalizedQuery),
+      );
+    }
+  }
+
+  return matches.length > 0
+    ? {
+        file,
+        matchCount,
+        matches,
+      }
+    : null;
+};
+
+const searchMarkSelector = 'mark.codiff-search-mark';
+
+const clearSearchHighlights = (root: ParentNode) => {
+  for (const mark of Array.from(root.querySelectorAll<HTMLElement>(searchMarkSelector))) {
+    const parent = mark.parentElement;
+    mark.replaceWith(document.createTextNode(mark.textContent ?? ''));
+    parent?.normalize();
+  }
+};
+
+const getSearchableRoots = (element: HTMLElement): Array<ParentNode> => {
+  const roots: Array<ParentNode> = [element];
+  if (element.shadowRoot) {
+    roots.push(element.shadowRoot);
+  }
+  return roots;
+};
+
+const isNodeInsideSearchMark = (node: Node) =>
+  node.parentElement?.closest(searchMarkSelector) != null;
+
+const highlightTextContainer = (
+  container: HTMLElement,
+  normalizedQuery: string,
+  activeMatch: DiffSearchMatch | null,
+) => {
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) =>
+      node.textContent && node.textContent.toLowerCase().includes(normalizedQuery)
+        ? NodeFilter.FILTER_ACCEPT
+        : NodeFilter.FILTER_REJECT,
+  });
+  const textNodes: Array<Text> = [];
+  let node = walker.nextNode();
+  while (node) {
+    if (!isNodeInsideSearchMark(node)) {
+      textNodes.push(node as Text);
+    }
+    node = walker.nextNode();
+  }
+
+  const row = container.closest<HTMLElement>('[data-line]');
+  const codeColumn = container.closest<HTMLElement>('[data-code]');
+  const side = codeColumn?.hasAttribute('data-deletions') ? 'deletions' : 'additions';
+  const isActiveLine =
+    activeMatch?.lineNumber != null &&
+    Number(row?.dataset.line) === activeMatch.lineNumber &&
+    activeMatch.side === side;
+
+  for (const textNode of textNodes) {
+    const text = textNode.textContent ?? '';
+    const fragment = document.createDocumentFragment();
+    let offset = 0;
+    let matchIndex = text.toLowerCase().indexOf(normalizedQuery);
+
+    while (matchIndex !== -1) {
+      if (matchIndex > offset) {
+        fragment.append(document.createTextNode(text.slice(offset, matchIndex)));
+      }
+
+      const mark = document.createElement('mark');
+      mark.className = `codiff-search-mark${isActiveLine ? ' active' : ''}`;
+      mark.textContent = text.slice(matchIndex, matchIndex + normalizedQuery.length);
+      fragment.append(mark);
+      offset = matchIndex + normalizedQuery.length;
+      matchIndex = text.toLowerCase().indexOf(normalizedQuery, offset);
+    }
+
+    if (offset < text.length) {
+      fragment.append(document.createTextNode(text.slice(offset)));
+    }
+
+    textNode.replaceWith(fragment);
+  }
+};
+
+const applySearchHighlights = (
+  renderedItems: ReadonlyArray<{ element: HTMLElement; id: string }>,
+  query: string,
+  activeMatch: DiffSearchMatch | null,
+) => {
+  const normalizedQuery = query.trim().toLowerCase();
+
+  for (const { element, id } of renderedItems) {
+    for (const root of getSearchableRoots(element)) {
+      clearSearchHighlights(root);
+
+      if (!normalizedQuery) {
+        continue;
+      }
+
+      const matchForItem = activeMatch && activeMatch.itemId === id ? activeMatch : null;
+
+      for (const container of Array.from(
+        root.querySelectorAll<HTMLElement>('[data-code] [data-column-content]'),
+      )) {
+        highlightTextContainer(container, normalizedQuery, matchForItem);
+      }
+    }
+  }
+};
 
 const getItemVersion = (value: string) => {
   let hash = 0;
@@ -589,30 +872,37 @@ function CodeViewHeader({
 }
 
 function ReviewCodeView({
+  activeSearchMatch,
   collapsed,
   files,
+  forceExpandedPaths,
   itemVersionByPath,
   onSelectPathFromScroll,
   onToggleCollapsed,
   onToggleViewed,
   scrollTarget,
+  searchQuery,
   selectedPath,
   showWhitespace,
   viewed,
 }: {
+  activeSearchMatch: DiffSearchMatch | null;
   collapsed: ReadonlySet<string>;
   files: ReadonlyArray<ChangedFile>;
+  forceExpandedPaths: ReadonlySet<string>;
   itemVersionByPath: Readonly<Record<string, number>>;
   onSelectPathFromScroll: (viewer: CodeViewInstance) => void;
   onToggleCollapsed: (file: ChangedFile, isCollapsed: boolean) => void;
   onToggleViewed: (file: ChangedFile, isViewed: boolean) => void;
   scrollTarget: { path: string; request: number } | null;
+  searchQuery: string;
   selectedPath: string | null;
   showWhitespace: boolean;
   viewed: Record<string, string>;
 }) {
   const codeViewRef = useRef<CodeViewHandle<undefined>>(null);
   const handledScrollRequestRef = useRef<number | null>(null);
+  const highlightFrameRef = useRef<number | null>(null);
 
   const { firstItemByPath, itemMetadata, items } = useMemo(() => {
     const nextItems: Array<CodeViewItem> = [];
@@ -621,7 +911,7 @@ function ReviewCodeView({
 
     for (const file of files) {
       const isViewed = viewed[file.path] === file.fingerprint;
-      const isCollapsed = collapsed.has(file.path);
+      const isCollapsed = collapsed.has(file.path) && !forceExpandedPaths.has(file.path);
       const visibleSections = getVisibleDiffSections(file, showWhitespace);
       const sections = isCollapsed ? visibleSections.slice(0, 1) : visibleSections;
 
@@ -657,7 +947,15 @@ function ReviewCodeView({
       itemMetadata: nextItemMetadata,
       items: nextItems,
     };
-  }, [collapsed, files, itemVersionByPath, selectedPath, showWhitespace, viewed]);
+  }, [
+    collapsed,
+    files,
+    forceExpandedPaths,
+    itemVersionByPath,
+    selectedPath,
+    showWhitespace,
+    viewed,
+  ]);
 
   const codeViewOptions: CodeViewOptions<undefined> = useMemo(
     () =>
@@ -748,6 +1046,64 @@ function ReviewCodeView({
     };
   }, [firstItemByPath, scrollItemHeaderIntoView, scrollTarget]);
 
+  const scheduleSearchHighlights = useCallback(() => {
+    const viewer = codeViewRef.current?.getInstance();
+    if (!viewer) {
+      return;
+    }
+
+    if (highlightFrameRef.current != null) {
+      window.cancelAnimationFrame(highlightFrameRef.current);
+    }
+
+    highlightFrameRef.current = window.requestAnimationFrame(() => {
+      highlightFrameRef.current = null;
+      applySearchHighlights(viewer.getRenderedItems(), searchQuery, activeSearchMatch);
+    });
+  }, [activeSearchMatch, searchQuery]);
+
+  useEffect(
+    () => () => {
+      if (highlightFrameRef.current != null) {
+        window.cancelAnimationFrame(highlightFrameRef.current);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    scheduleSearchHighlights();
+  }, [items, scheduleSearchHighlights]);
+
+  useEffect(() => {
+    const handle = codeViewRef.current;
+    const viewer = handle?.getInstance();
+    if (!handle || !viewer || !activeSearchMatch) {
+      return;
+    }
+
+    if (activeSearchMatch.lineNumber == null) {
+      handle.scrollTo({
+        align: 'center',
+        behavior: 'smooth-auto',
+        id: activeSearchMatch.itemId,
+        type: 'item',
+      });
+    } else {
+      handle.scrollTo({
+        align: 'center',
+        behavior: 'smooth-auto',
+        id: activeSearchMatch.itemId,
+        lineNumber: activeSearchMatch.lineNumber,
+        offset: DEFAULT_PADDING,
+        side: activeSearchMatch.side,
+        type: 'line',
+      });
+    }
+
+    scheduleSearchHighlights();
+  }, [activeSearchMatch, scheduleSearchHighlights]);
+
   const renderCustomHeader = useCallback(
     (item: CodeViewItem) => {
       const meta = itemMetadata.get(item.id);
@@ -765,8 +1121,9 @@ function ReviewCodeView({
   const handleScroll = useCallback(
     (_scrollTop: number, viewer: CodeViewInstance) => {
       onSelectPathFromScroll(viewer);
+      scheduleSearchHighlights();
     },
-    [onSelectPathFromScroll],
+    [onSelectPathFromScroll, scheduleSearchHighlights],
   );
 
   return (
@@ -797,14 +1154,113 @@ function RepositoryChangeBanner({ visible }: { visible: boolean }) {
   );
 }
 
+function DiffSearchPanel({
+  activeIndex,
+  focusRequest,
+  matchCount,
+  onChange,
+  onClose,
+  onNext,
+  onPrevious,
+  query,
+  visible,
+}: {
+  activeIndex: number;
+  focusRequest: number;
+  matchCount: number;
+  onChange: (query: string) => void;
+  onClose: () => void;
+  onNext: () => void;
+  onPrevious: () => void;
+  query: string;
+  visible: boolean;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!visible) {
+      return;
+    }
+
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    });
+  }, [focusRequest, visible]);
+
+  const handleKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLInputElement>) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        if (event.shiftKey) {
+          onPrevious();
+        } else {
+          onNext();
+        }
+      }
+    },
+    [onClose, onNext, onPrevious],
+  );
+
+  return (
+    <div className={`diff-search-panel${visible ? ' visible' : ''}`}>
+      <input
+        aria-label="Search diffs"
+        className="diff-search-input"
+        onChange={(event) => onChange(event.currentTarget.value)}
+        onKeyDown={handleKeyDown}
+        placeholder="Find in diffs"
+        ref={inputRef}
+        spellCheck={false}
+        type="search"
+        value={query}
+      />
+      <span className="diff-search-count">
+        {query.trim() ? (matchCount > 0 ? `${activeIndex + 1}/${matchCount}` : '0/0') : ''}
+      </span>
+      <button
+        aria-label="Previous match"
+        disabled={matchCount === 0}
+        onClick={onPrevious}
+        title="Previous match"
+        type="button"
+      >
+        <span aria-hidden className="diff-search-chevron up" />
+      </button>
+      <button
+        aria-label="Next match"
+        disabled={matchCount === 0}
+        onClick={onNext}
+        title="Next match"
+        type="button"
+      >
+        <span aria-hidden className="diff-search-chevron down" />
+      </button>
+      <button aria-label="Close search" onClick={onClose} title="Close" type="button">
+        <span aria-hidden className="diff-search-close-icon" />
+      </button>
+    </div>
+  );
+}
+
 export default function App() {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const [activeDiffSearchMatchIndex, setActiveDiffSearchMatchIndex] = useState(0);
+  const [diffSearchFocusRequest, setDiffSearchFocusRequest] = useState(0);
+  const [diffSearchQuery, setDiffSearchQuery] = useState('');
+  const [diffSearchVisible, setDiffSearchVisible] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [itemVersionByPath, setItemVersionByPath] = useState<Record<string, number>>({});
   const [localChangesDetected, setLocalChangesDetected] = useState(false);
   const [preferences, setPreferences] = useState<CodiffPreferences>(defaultPreferences);
   const [scrollTarget, setScrollTarget] = useState<{ path: string; request: number } | null>(null);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [fileSearchQuery, setFileSearchQuery] = useState('');
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [state, setState] = useState<RepositoryState | null>(null);
   const [viewed, setViewed] = useState<Record<string, string>>({});
@@ -971,6 +1427,126 @@ export default function App() {
   }, [bumpItemVersion, selectedPath, state]);
 
   useEffect(() => {
+    if (!state || state.source.type !== 'working-tree' || !diffSearchQuery.trim()) {
+      return;
+    }
+
+    const searchableFiles = sortFiles(state.files).filter(
+      (file) =>
+        fuzzyMatches(file.path, fileSearchQuery) &&
+        fileHasVisibleDiff(file, preferences.showWhitespace),
+    );
+    const requests = searchableFiles.flatMap((file) =>
+      file.sections
+        .filter((section) => section.loadState === 'deferred' && section.summary?.canLoad !== false)
+        .map((section) => ({
+          file,
+          section,
+        })),
+    );
+
+    if (!requests.length) {
+      return;
+    }
+
+    let canceled = false;
+    let cursor = 0;
+
+    const loadNext = async (): Promise<void> => {
+      if (canceled) {
+        return;
+      }
+
+      const request = requests[cursor];
+      cursor += 1;
+      if (!request) {
+        return;
+      }
+
+      const key = `${state.root}:${request.section.id}`;
+      if (loadingSectionKeysRef.current.has(key)) {
+        return loadNext();
+      }
+
+      loadingSectionKeysRef.current.add(key);
+
+      try {
+        const loadedSection = await window.codiff.getDiffSectionContent({
+          force: true,
+          kind: request.section.kind,
+          path: request.file.path,
+          source: state.source,
+        });
+
+        if (!canceled) {
+          setState((current) => {
+            if (!current || current.root !== state.root) {
+              return current;
+            }
+
+            return {
+              ...current,
+              files: current.files.map((file) =>
+                file.path === request.file.path
+                  ? {
+                      ...file,
+                      sections: file.sections.map((candidate) =>
+                        candidate.id === request.section.id ? loadedSection : candidate,
+                      ),
+                    }
+                  : file,
+              ),
+            };
+          });
+          bumpItemVersion(request.file.path);
+        }
+      } catch {
+        if (!canceled) {
+          setState((current) => {
+            if (!current || current.root !== state.root) {
+              return current;
+            }
+
+            return {
+              ...current,
+              files: current.files.map((file) =>
+                file.path === request.file.path
+                  ? {
+                      ...file,
+                      sections: file.sections.map((candidate) =>
+                        candidate.id === request.section.id
+                          ? {
+                              ...candidate,
+                              loadState: 'error',
+                              summary: {
+                                canLoad: false,
+                                reason: 'Codiff could not load this file.',
+                              },
+                            }
+                          : candidate,
+                      ),
+                    }
+                  : file,
+              ),
+            };
+          });
+          bumpItemVersion(request.file.path);
+        }
+      } finally {
+        loadingSectionKeysRef.current.delete(key);
+      }
+
+      return loadNext();
+    };
+
+    void Promise.all(Array.from({ length: Math.min(3, requests.length) }, () => loadNext()));
+
+    return () => {
+      canceled = true;
+    };
+  }, [bumpItemVersion, diffSearchQuery, fileSearchQuery, preferences.showWhitespace, state]);
+
+  useEffect(() => {
     let canceled = false;
 
     window.codiff.getPreferences().then((nextPreferences) => {
@@ -999,15 +1575,95 @@ export default function App() {
   );
 
   const showWhitespace = preferences.showWhitespace;
-  const visibleFiles = useMemo(
+  const fileFilteredFiles = useMemo(
     () =>
       state
         ? sortFiles(state.files).filter(
             (file) =>
-              fuzzyMatches(file.path, searchQuery) && fileHasVisibleDiff(file, showWhitespace),
+              fuzzyMatches(file.path, fileSearchQuery) && fileHasVisibleDiff(file, showWhitespace),
           )
         : [],
-    [searchQuery, showWhitespace, state],
+    [fileSearchQuery, showWhitespace, state],
+  );
+
+  const diffSearchResults = useMemo(
+    () =>
+      diffSearchQuery.trim()
+        ? fileFilteredFiles
+            .map((file) => getDiffSearchResult(file, showWhitespace, diffSearchQuery))
+            .filter((result): result is DiffSearchResult => result != null)
+        : [],
+    [diffSearchQuery, fileFilteredFiles, showWhitespace],
+  );
+
+  const diffSearchMatches = useMemo(
+    () => diffSearchResults.flatMap((result) => result.matches),
+    [diffSearchResults],
+  );
+
+  const diffSearchMatchPathSet = useMemo(
+    () => new Set(diffSearchResults.map((result) => result.file.path)),
+    [diffSearchResults],
+  );
+
+  const visibleFiles = useMemo(
+    () =>
+      diffSearchQuery.trim()
+        ? fileFilteredFiles.filter((file) => diffSearchMatchPathSet.has(file.path))
+        : fileFilteredFiles,
+    [diffSearchMatchPathSet, diffSearchQuery, fileFilteredFiles],
+  );
+
+  const effectiveActiveDiffSearchMatchIndex =
+    diffSearchMatches.length === 0
+      ? 0
+      : Math.min(activeDiffSearchMatchIndex, diffSearchMatches.length - 1);
+  const activeDiffSearchMatch = diffSearchMatches[effectiveActiveDiffSearchMatchIndex] ?? null;
+
+  const openDiffSearch = useCallback(() => {
+    setDiffSearchVisible(true);
+    setDiffSearchFocusRequest((current) => current + 1);
+  }, []);
+
+  const closeDiffSearch = useCallback(() => {
+    setDiffSearchVisible(false);
+    setDiffSearchQuery('');
+    setActiveDiffSearchMatchIndex(0);
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') {
+        event.preventDefault();
+        openDiffSearch();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [openDiffSearch]);
+
+  useEffect(() => window.codiff.onFindInDiffs(openDiffSearch), [openDiffSearch]);
+
+  const updateDiffSearchQuery = useCallback((query: string) => {
+    setDiffSearchQuery(query);
+    setDiffSearchVisible(true);
+    setActiveDiffSearchMatchIndex(0);
+  }, []);
+
+  const moveDiffSearchMatch = useCallback(
+    (direction: 1 | -1) => {
+      setDiffSearchVisible(true);
+      setActiveDiffSearchMatchIndex((current) => {
+        const matchCount = diffSearchMatches.length;
+        if (matchCount === 0) {
+          return 0;
+        }
+
+        return (current + direction + matchCount) % matchCount;
+      });
+    },
+    [diffSearchMatches.length],
   );
 
   const selectPath = useCallback((path: string) => {
@@ -1143,17 +1799,30 @@ export default function App() {
   }
 
   if (!state) {
-    return <main className="loading">Loading</main>;
+    return <main className="loading italic">Thinking…</main>;
   }
 
+  const selectedOrSearchPath = activeDiffSearchMatch?.filePath ?? selectedPath;
   const visibleSelectedPath =
-    selectedPath && visibleFiles.some((file) => file.path === selectedPath)
-      ? selectedPath
+    selectedOrSearchPath && visibleFiles.some((file) => file.path === selectedOrSearchPath)
+      ? selectedOrSearchPath
       : (visibleFiles[0]?.path ?? null);
+  const hasDiffSearchQuery = diffSearchQuery.trim().length > 0;
 
   return (
     <div className="app-shell">
       <RepositoryChangeBanner visible={localChangesDetected} />
+      <DiffSearchPanel
+        activeIndex={effectiveActiveDiffSearchMatchIndex}
+        focusRequest={diffSearchFocusRequest}
+        matchCount={diffSearchMatches.length}
+        onChange={updateDiffSearchQuery}
+        onClose={closeDiffSearch}
+        onNext={() => moveDiffSearchMatch(1)}
+        onPrevious={() => moveDiffSearchMatch(-1)}
+        query={diffSearchQuery}
+        visible={diffSearchVisible}
+      />
       <aside className="sidebar squircle">
         <div className="sidebar-header">
           <div className="sidebar-path-row">
@@ -1165,9 +1834,9 @@ export default function App() {
         <Sidebar
           files={visibleFiles}
           onActivatePath={activatePath}
-          onSearchQueryChange={setSearchQuery}
+          onSearchQueryChange={setFileSearchQuery}
           onSelectPath={selectPath}
-          searchQuery={searchQuery}
+          searchQuery={fileSearchQuery}
           selectedPath={visibleSelectedPath}
         />
       </aside>
@@ -1182,21 +1851,26 @@ export default function App() {
         ) : visibleFiles.length === 0 ? (
           <div className="empty-state">
             <div className="empty-panel squircle">
-              <strong>No matching files</strong>
+              <strong>{hasDiffSearchQuery ? 'No matches in diffs' : 'No matching files'}</strong>
               <span>
-                {searchQuery || (showWhitespace ? state.root : 'Whitespace-only changes hidden')}
+                {diffSearchQuery ||
+                  fileSearchQuery ||
+                  (showWhitespace ? state.root : 'Whitespace-only changes hidden')}
               </span>
             </div>
           </div>
         ) : (
           <ReviewCodeView
+            activeSearchMatch={activeDiffSearchMatch}
             collapsed={collapsed}
             files={visibleFiles}
+            forceExpandedPaths={diffSearchMatchPathSet}
             itemVersionByPath={itemVersionByPath}
             onSelectPathFromScroll={updateSelectedPathFromScroll}
             onToggleCollapsed={toggleCollapsed}
             onToggleViewed={toggleViewed}
             scrollTarget={scrollTarget}
+            searchQuery={diffSearchQuery}
             selectedPath={visibleSelectedPath}
             showWhitespace={showWhitespace}
             viewed={viewed}

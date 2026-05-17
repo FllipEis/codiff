@@ -2,10 +2,18 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('codiff', {
   getDiffSectionContent: (request) => ipcRenderer.invoke('codiff:getDiffSectionContent', request),
+  getGitIdentity: () => ipcRenderer.invoke('codiff:getGitIdentity'),
+  getLaunchOptions: () => ipcRenderer.invoke('codiff:getLaunchOptions'),
   getPreferences: () => ipcRenderer.invoke('codiff:getPreferences'),
   getProjects: () => ipcRenderer.invoke('codiff:getProjects'),
   getRepositoryHistory: (limit) => ipcRenderer.invoke('codiff:getRepositoryHistory', limit),
   getRepositoryState: (source) => ipcRenderer.invoke('codiff:getRepositoryState', source),
+  getWalkthrough: (source) => ipcRenderer.invoke('codiff:getWalkthrough', source),
+  onFindInDiffs: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('codiff:findInDiffs', listener);
+    return () => ipcRenderer.removeListener('codiff:findInDiffs', listener);
+  },
   onPreferencesChanged: (callback) => {
     const listener = (_event, preferences) => callback(preferences);
     ipcRenderer.on('codiff:preferencesChanged', listener);

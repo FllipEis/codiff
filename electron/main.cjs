@@ -24,14 +24,18 @@ const {
 const squirrelStartup = require('electron-squirrel-startup');
 const {
   listRepositoryHistory,
+  readGitIdentity,
   readDiffSectionContent,
   readRepositoryChangeSignature,
   readRepositoryState,
+  validateRepositoryPath,
 } = require('./git-state.cjs');
 const { createProjectManager } = require('./project-manager.cjs');
+const { readWalkthrough } = require('./walkthrough.cjs');
 
 const root = dirname(__dirname);
 const repositoryWatchers = new Map();
+const windowLaunchOptions = new Map();
 let preferences = {
   lastProjectRoot: null,
   projects: [],
@@ -46,8 +50,20 @@ const getCommandLineRepositoryPath = (commandLine = process.argv) => {
 const getExplicitLaunchPath = () =>
   process.env.CODIFF_REPOSITORY_PATH || getCommandLineRepositoryPath();
 
+const getCommandLineLaunchOptions = (commandLine = process.argv) => {
+  const args = commandLine.slice(process.defaultApp ? 2 : 1);
+  return {
+    walkthrough:
+      process.env.CODIFF_WALKTHROUGH === '1' ||
+      args.includes('--walkthrough') ||
+      args.includes('-w'),
+  };
+};
+
 const getLaunchPath = () =>
   resolve(getExplicitLaunchPath() || preferences.lastProjectRoot || process.cwd());
+
+const getLaunchOptions = () => getCommandLineLaunchOptions();
 
 const getPreferencesPath = () => join(app.getPath('userData'), 'preferences.json');
 
@@ -157,7 +173,7 @@ const openRepositoryFolder = async (browserWindow) => {
   });
 
   if (!result.canceled && result.filePaths[0]) {
-    createWindow(result.filePaths[0]);
+    createWindow(result.filePaths[0], { walkthrough: false });
   }
 };
 
@@ -260,6 +276,14 @@ const buildApplicationMenu = () =>
         { role: 'pasteAndMatchStyle' },
         { role: 'delete' },
         { role: 'selectAll' },
+        { type: 'separator' },
+        {
+          accelerator: 'CommandOrControl+F',
+          click: (_menuItem, browserWindow) => {
+            browserWindow?.webContents.send('codiff:findInDiffs');
+          },
+          label: 'Find in Diffs',
+        },
       ],
     },
     {
@@ -278,6 +302,7 @@ const buildApplicationMenu = () =>
           type: 'checkbox',
         },
         { type: 'separator' },
+        { role: 'togglefullscreen' },
         { role: 'reload' },
         {
           accelerator: 'CommandOrControl+Alt+J',
@@ -288,7 +313,7 @@ const buildApplicationMenu = () =>
     },
   ]);
 
-const createWindow = (repositoryPath = getLaunchPath()) => {
+const createWindow = (repositoryPath = getLaunchPath(), launchOptions = { walkthrough: false }) => {
   const activeRoot = resolve(repositoryPath || preferences.lastProjectRoot || getLaunchPath());
   const display = screen.getPrimaryDisplay();
   const { height, width } = display.workAreaSize;
@@ -313,6 +338,7 @@ const createWindow = (repositoryPath = getLaunchPath()) => {
 
   const webContentsId = window.webContents.id;
   projectManager.seedWindow(webContentsId, activeRoot);
+  windowLaunchOptions.set(webContentsId, launchOptions);
   startRepositoryWatcher(window, activeRoot);
   window.once('ready-to-show', () => window.show());
   window.on('closed', () => {
@@ -322,6 +348,7 @@ const createWindow = (repositoryPath = getLaunchPath()) => {
     }
     repositoryWatchers.delete(webContentsId);
     projectManager.removeWindow(webContentsId);
+    windowLaunchOptions.delete(webContentsId);
   });
 
   const rendererURL = process.env.ELECTRON_RENDERER_URL;
@@ -336,6 +363,7 @@ const lock =
   !squirrelStartup &&
   app.requestSingleInstanceLock({
     repositoryPath: getExplicitLaunchPath() ? resolve(getExplicitLaunchPath()) : null,
+    launchOptions: getLaunchOptions(),
   });
 
 if (squirrelStartup || !lock) {
@@ -350,18 +378,19 @@ if (squirrelStartup || !lock) {
           getCommandLineRepositoryPath(commandLine) ||
           workingDirectory,
       ),
+      additionalData?.launchOptions || getCommandLineLaunchOptions(commandLine),
     );
   });
 
   app.on('ready', () => {
     preferences = readPreferences();
     Menu.setApplicationMenu(buildApplicationMenu());
-    createWindow();
+    createWindow(getLaunchPath(), getLaunchOptions());
   });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+      createWindow(getLaunchPath(), getLaunchOptions());
     }
   });
 
@@ -375,6 +404,20 @@ ipcMain.handle('codiff:getRepositoryState', async (event, source) => {
   const state = await readRepositoryState(repositoryPath, source);
   await resetRepositoryWatcher(event.sender.id, repositoryPath);
   return state;
+});
+
+ipcMain.handle(
+  'codiff:getLaunchOptions',
+  (event) =>
+    windowLaunchOptions.get(event.sender.id) || {
+      walkthrough: false,
+    },
+);
+
+ipcMain.handle('codiff:getWalkthrough', async (event, source) => {
+  const repositoryPath = projectManager.getActiveRepositoryPath(event.sender.id);
+  const state = await readRepositoryState(repositoryPath, source);
+  return readWalkthrough(state);
 });
 
 ipcMain.handle('codiff:getDiffSectionContent', async (event, request) => {
@@ -420,12 +463,18 @@ ipcMain.handle('codiff:openProject', async (event) => {
   return projectManager.readProjectList(event.sender.id);
 });
 
+ipcMain.handle('codiff:getGitIdentity', async (event) => {
+  const repositoryPath = projectManager.getActiveRepositoryPath(event.sender.id);
+  return readGitIdentity(repositoryPath);
+});
+
 ipcMain.handle('codiff:getPreferences', () => preferences);
 
 ipcMain.handle('codiff:showInFolder', async (event, filePath) => {
   const repositoryPath = projectManager.getActiveRepositoryPath(event.sender.id);
   const state = await readRepositoryState(repositoryPath);
-  const absolutePath = resolve(state.root, filePath);
+  const repositoryFilePath = validateRepositoryPath(filePath);
+  const absolutePath = resolve(state.root, repositoryFilePath);
 
   if (existsSync(absolutePath)) {
     shell.showItemInFolder(absolutePath);

@@ -45,7 +45,7 @@ The Nakazawa Tech Apple account, team, and Developer ID certificate are reusable
 These parts are app-specific:
 
 - `dev.nkzw-tech.codiff` must be the bundle ID you want to use for Codiff.
-- Codiff should eventually get its own `electron/icons/icon.icns`, `electron/icons/icon.ico`, and `electron/icons/icon.png`. The Forge config uses these automatically if present.
+- Codiff includes `electron/icons/icon.icns`, `electron/icons/icon.ico`, and `electron/icons/icon.png`. The Forge config uses these automatically, and the source Icon Composer document lives at `electron/icons/Codiff.icon`.
 - Release asset hosting URLs are app-specific. For Homebrew, the macOS zip needs a stable HTTPS URL.
 
 ## Homebrew Tap

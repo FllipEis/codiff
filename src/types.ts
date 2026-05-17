@@ -72,6 +72,43 @@ export type RepositoryState = {
   source: ReviewSource;
 };
 
+export type CodiffLaunchOptions = {
+  walkthrough: boolean;
+};
+
+export type WalkthroughFile = {
+  path: string;
+  reason: string;
+};
+
+export type WalkthroughGroup = {
+  files: ReadonlyArray<WalkthroughFile>;
+  reason: string;
+  title: string;
+};
+
+export type Walkthrough = {
+  groups: ReadonlyArray<WalkthroughGroup>;
+  summary: string;
+  version: 1;
+};
+
+export type WalkthroughResult =
+  | {
+      status: 'ready';
+      walkthrough: Walkthrough;
+    }
+  | {
+      reason: string;
+      status: 'unavailable';
+    };
+
+export type GitIdentity = {
+  email: string;
+  gravatarUrl?: string;
+  name: string;
+};
+
 export type DiffSectionContentRequest = {
   force?: boolean;
   kind: DiffSection['kind'];

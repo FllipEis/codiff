@@ -8,6 +8,9 @@ const execFileAsync = promisify(execFile);
 
 const getFingerprint = (value) => createHash('sha256').update(value).digest('hex').slice(0, 16);
 
+const getGravatarHash = (email) =>
+  createHash('md5').update(email.trim().toLowerCase()).digest('hex');
+
 const git = async (repoPath, args, options = {}) => {
   const { stdout } = await execFileAsync('git', ['-C', repoPath, ...args], {
     encoding: options.encoding || 'utf8',
@@ -165,7 +168,7 @@ const validateRepositoryPath = (path) => {
 
 const readFileStat = async (repoRoot, path) => {
   try {
-    return await fs.stat(join(repoRoot, path));
+    return await fs.lstat(join(repoRoot, path));
   } catch {
     return undefined;
   }
@@ -287,6 +290,37 @@ const readWorkingTreeFile = async (repoRoot, path, options = {}) => {
         summary: createSummary('Untracked directory is collapsed by default.', {
           canLoad: false,
         }),
+      };
+    }
+
+    if (stat.isSymbolicLink()) {
+      const contents = await fs.readlink(join(repoRoot, path));
+      const size = Buffer.byteLength(contents);
+
+      if (size > limit) {
+        return {
+          binary: false,
+          loadState: size > MANUAL_TEXT_FILE_LIMIT ? 'too-large' : 'deferred',
+          summary: createSummary(
+            size > MANUAL_TEXT_FILE_LIMIT
+              ? `Symlink target is ${formatBytes(size)}, so Codiff skipped rendering it.`
+              : `Symlink target is ${formatBytes(size)} and will be loaded on demand.`,
+            {
+              canLoad: size <= MANUAL_TEXT_FILE_LIMIT,
+              limit,
+              size,
+            },
+          ),
+        };
+      }
+
+      return {
+        binary: false,
+        file: {
+          cacheKey: `worktree:${path}:symlink:${contents}`,
+          contents,
+          name: path,
+        },
       };
     }
 
@@ -688,7 +722,7 @@ const readUntrackedFileSignatures = async (repoRoot) => {
 
   for (const path of paths) {
     try {
-      const stat = await fs.stat(join(repoRoot, path));
+      const stat = await fs.lstat(join(repoRoot, path));
       signatures.push(`${path}\0${stat.size}\0${stat.mtimeMs}\0${stat.mode}`);
     } catch {
       signatures.push(`${path}\0missing`);
@@ -704,6 +738,23 @@ const gitOrEmpty = async (repoRoot, args) => {
   } catch {
     return '';
   }
+};
+
+const readGitIdentity = async (launchPath) => {
+  const repoRoot = (await git(launchPath, ['rev-parse', '--show-toplevel'])).trim();
+  const [name, email] = await Promise.all([
+    gitOrEmpty(repoRoot, ['config', '--get', 'user.name']),
+    gitOrEmpty(repoRoot, ['config', '--get', 'user.email']),
+  ]);
+  const trimmedEmail = email.trim();
+
+  return {
+    email: trimmedEmail,
+    gravatarUrl: trimmedEmail
+      ? `https://www.gravatar.com/avatar/${getGravatarHash(trimmedEmail)}?s=80&d=identicon`
+      : undefined,
+    name: name.trim(),
+  };
 };
 
 const readRepositoryChangeSignature = async (launchPath) => {
@@ -821,8 +872,10 @@ module.exports = {
   listRepositoryHistory,
   parseStatus,
   readDiffSectionContent,
+  readGitIdentity,
   readRepositoryChangeSignature,
   readCommitState,
   readRepositoryState,
   readWorkingTreeState,
+  validateRepositoryPath,
 };

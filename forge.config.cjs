@@ -6,11 +6,24 @@ const entitlementsPath = join(__dirname, 'electron/entitlements.plist');
 const iconPath = existsSync(join(__dirname, 'electron/icons/icon.icns'))
   ? './electron/icons/icon'
   : undefined;
+const linuxIconPath = './electron/icons/icon.png';
+const windowsIconPath = './electron/icons/icon.ico';
+const osxNotarize =
+  process.env.APPLE_ID && process.env.APPLE_PASSWORD && process.env.APPLE_TEAM_ID
+    ? {
+        appleId: process.env.APPLE_ID,
+        appleIdPassword: process.env.APPLE_PASSWORD,
+        teamId: process.env.APPLE_TEAM_ID,
+        tool: 'notarytool',
+      }
+    : undefined;
 
 module.exports = {
   makers: [
     {
-      config: {},
+      config: {
+        setupIcon: windowsIconPath,
+      },
       name: '@electron-forge/maker-squirrel',
     },
     {
@@ -23,11 +36,15 @@ module.exports = {
       platforms: ['win32'],
     },
     {
-      config: {},
+      config: {
+        icon: linuxIconPath,
+      },
       name: '@electron-forge/maker-deb',
     },
     {
-      config: {},
+      config: {
+        icon: linuxIconPath,
+      },
       name: '@electron-forge/maker-rpm',
     },
   ],
@@ -35,6 +52,7 @@ module.exports = {
     appBundleId: 'dev.nkzw-tech.codiff',
     appCopyright: 'Copyright (c) 2026-current Nakazawa Tech',
     asar: false,
+    executableName: 'codiff',
     ...(iconPath ? { icon: iconPath } : {}),
     ignore: [
       /^\/\.DS_Store$/,
@@ -58,12 +76,7 @@ module.exports = {
       /^\/vite\.config\./,
     ],
     name: 'Codiff',
-    osxNotarize: {
-      appleId: process.env.APPLE_ID,
-      appleIdPassword: process.env.APPLE_PASSWORD,
-      teamId: process.env.APPLE_TEAM_ID,
-      tool: 'notarytool',
-    },
+    ...(osxNotarize ? { osxNotarize } : {}),
     osxSign: {
       continueOnError: false,
       hardenedRuntime: true,
